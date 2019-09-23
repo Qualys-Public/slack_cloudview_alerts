@@ -22,8 +22,8 @@
 # --csv, -c
 # --slack, -s
 #----------------------------------------------------------
-# version: 1.0.2
-# date: 9.05.2019
+# version: 1.0.3
+# date: 9.23.2019
 #----------------------------------------------------------
 
 import sys, requests, os, time, csv, getopt, logging, yaml, json, base64
@@ -102,47 +102,62 @@ def cloudviewReport(cloud, accountID, webhook, URL, headers):
         fieldnames = ["Account","Control Name","Number of Failed Resources","Failed Resource List"]
         writer = csv.DictWriter(ofile, fieldnames=fieldnames)
         writer.writeheader()
-
-    rURL = URL + "/cloudview-api/rest/v1/" + str(cloud) + "/evaluations/" + str(accountID) + "?evaluatedOn:now-8h...now-1s"
+    pageNo = 0
+    fullResults = False
+    rURL = URL + "/cloudview-api/rest/v1/" + str(cloud) + "/evaluations/" + str(accountID) + "?evaluatedOn:now-8h...now-1s&pageSize=100&pageNo={}".format(str(pageNo))
     rdata = requests.get(rURL, headers=headers)
     logger.info("GET list of control evaluations for Account ID %s - run status code %s", str(accountID), rdata.status_code)
+    pagedControlList = []
     controlFailures = []
     controlText = {}
     controlList = json.loads(rdata.text)
     logger.debug("Length of control list content {}".format(len(controlList['content'])))
-    for control in controlList['content']:
+    while fullResults == False:
+        for control in controlList['content']:
+            if control['failedResources'] > 0:
+                pagedControlList.append(control)
+        logger.debug("str(controlList[\'last\']) = {0} and int(controlList[\'totalPages\']) == {1}".format(controlList['last'], str(controlList['totalPages'])))
+        if controlList['last'] == True:
+            fullResults = True
+        else:
+            pageNo += 1
+            rURL = URL + "/cloudview-api/rest/v1/" + str(cloud) + "/evaluations/" + str(accountID) + "?evaluatedOn:now-8h...now-1s&pageSize=100&pageNo={}".format(str(pageNo))
+            rdata = requests.get(rURL, headers=headers)
+            logger.info("GET Next Page {0} list of control evaluations for Account ID {1} - run status code {2}".format(str(pageNo), str(accountID), str(rdata.status_code)))
+            controlList = json.loads(rdata.text)
+
+    for control in pagedControlList:
+        pageNo = 0
         controlText['text'] = ''
-        if control['failedResources'] > 0:
+        rURL2 = URL + "/cloudview-api/rest/v1/" + str(cloud) + "/evaluations/" + str(accountID) + "/resources/" + str(control['controlId']) + "?evaluatedOn:now-8h...now-1s&pageNo={}&pageSize=50".format(str(pageNo))
+        rdata2 = requests.get(rURL2, headers=headers)
+        logger.debug("Get Page {0} resource list per account per control request status code {1}".format(str(pageNo), rdata2.status_code))
+        logger.debug("Get Page {0} resource list per account per control request resource list \n{1}".format(str(pageNo), rdata2.text))
+        failedResources = []
+        resourceList = json.loads(rdata2.text)
+        logger.info("Resource Details Control ID {0} for {1} Failures".format(str(control['controlId']), str(control['failedResources'])))
+        fullResults = False
+        while fullResults == False:
+            for resource in resourceList['content']:
+                logger.debug("Resource Info \n {} \n".format(str(resource)))
+                if resource['result'] == "FAIL":
+                    failedResources.append(str(resource['resourceId']))
+            if resourceList['last'] == True:
+                fullResults = True
+            else:
+                pageNo += 1
+                rURL2 = URL + "/cloudview-api/rest/v1/" + str(cloud) + "/evaluations/" + str(accountID) + "/resources/" + str(control['controlId']) + "?evaluatedOn:now-8h...now-1s&pageNo={}&pageSize=50".format(str(pageNo))
+                rdata2 = requests.get(rURL2, headers=headers)
+                logger.debug("Get Page {0} resource list per account per control request status code {1}".format(str(pageNo), rdata2.status_code))
+                logger.debug("Get Page {0} resource list per account per control request resource list \n{1}".format(str(pageNo), rdata2.text))
+                resourceList = json.loads(rdata2.text)
+        controlText['text'] = "Failed Control CID {0}, Control Name: {1}, Number of Failed Resources {2}\n Failed Resources: \n {3}".format(control['controlId'],control['controlName'], str(control['failedResources']), str(failedResources))
+        if args.csv:
+            writer.writerow({"Account": str(accountID), "Control Name": str(control['controlName']).replace("\n", "") ,"Number of Failed Resources": str(control['failedResources']), "Failed Resource List": str(failedResources).strip("[]")})
+        logger.debug(controlText['text'])
 
-            rURL2 = URL + "/cloudview-api/rest/v1/" + str(cloud) + "/evaluations/" + str(accountID) + "/resources/" + str(control['controlId']) + "?evaluatedOn:now-8h...now-1s&pageNo=0&pageSize=50"
-            rdata2 = requests.get(rURL2, headers=headers)
-            logger.debug("Get resource list per account per control request status code {}".format(str(rdata2.status_code)))
-            failedResources = []
-            pageCount = 0
-            resourceList = json.loads(rdata2.text)
-            logger.info("Resource Details Control ID {0} for {1} Failures".format(str(control['controlId']), str(control['failedResources'])))
-            while pageCount < resourceList['totalPages']:
-                if pageCount == 0:
-                    for resource in resourceList['content']:
-                        if resource['result'] == "FAIL":
-                            failedResources.append(str(resource['resourceId']))
-                    pageCount += 1
-                else:
-                    rURL3 = URL + "/cloudview-api/rest/v1/" + str(cloud) + "/evaluations/" + str(accountID) + "/resources/" + str(control['controlId']) + "?evaluatedOn:now-8h...now-1s&pageNo=" + str(pageCount) +"&pageSize=50"
-                    rdata3 = requests.get(rURL3, headers=headers)
-                    for resource in resourceList['content']:
-                        if resource['result'] == "FAIL":
-                            failedResources.append(resource['resourceId'])
+        controlFailures.append(dict(controlText))
 
-                    pageCount += 1
-
-
-            controlText['text'] = "Failed Control CID {0}, Control Name: {1}, Number of Failed Resources {2}\n Failed Resources: \n {3}".format(control['controlId'],control['controlName'], str(control['failedResources']), str(failedResources))
-            if args.csv:
-                writer.writerow({"Account": str(accountID), "Control Name": str(control['controlName']).replace("\n", "") ,"Number of Failed Resources": str(control['failedResources']), "Failed Resource List": str(failedResources).strip("[]")})
-            logger.debug(controlText['text'])
-
-            controlFailures.append(dict(controlText))
     if args.csv:
         ofile.close()
     return controlFailures
